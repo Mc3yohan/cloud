@@ -15,6 +15,9 @@ import (
 )
 
 func TestCLIEndToEndExecutionAndJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full CLI benchmark build/run in -short mode")
+	}
 	tmp := t.TempDir()
 	binName := "ensoroutellmsim"
 	goBinName := "go"

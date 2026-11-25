@@ -16,26 +16,51 @@ import (
 	"time"
 )
 
+var (
+	fixtureOnce    sync.Once
+	fixtureCatalog []ModelArm
+	fixtureWeights *TrainedWeights
+
+	defaultBenchOnce sync.Once
+	defaultBenchRep  BenchmarkReport
+)
+
+func getFixtureWeights() ([]ModelArm, *TrainedWeights) {
+	fixtureOnce.Do(func() {
+		fixtureCatalog = DefaultCatalog()
+		corpus := GenerateStandardCorpus(180, fixtureCatalog, 424242)
+		var samples []TrainingSample
+		for _, item := range corpus {
+			feats := ExtractFeatures(item.Request)
+			for _, arm := range fixtureCatalog {
+				if arm.FastModeOnly {
+					continue
+				}
+				samples = append(samples, TrainingSample{
+					QueryID:  item.QueryID,
+					Features: feats,
+					ModelID:  arm.ID,
+					Passed:   item.ArmOutcomes[arm.ID],
+				})
+			}
+		}
+		fixtureWeights = FitTrainedWeights(samples, fixtureCatalog, 424242)
+	})
+	cp := make([]ModelArm, len(fixtureCatalog))
+	copy(cp, fixtureCatalog)
+	return cp, fixtureWeights
+}
+
+func getDefaultBenchmarkReport() BenchmarkReport {
+	defaultBenchOnce.Do(func() {
+		defaultBenchRep = RunBenchmarkSuite(DefaultEvalSeed)
+	})
+	return defaultBenchRep
+}
+
 func buildFixtureRouter(t *testing.T) (*EnsoRouter, *TrainedWeights, []ModelArm) {
 	t.Helper()
-	catalog := DefaultCatalog()
-	corpus := GenerateStandardCorpus(180, catalog, 424242)
-	var samples []TrainingSample
-	for _, item := range corpus {
-		feats := ExtractFeatures(item.Request)
-		for _, arm := range catalog {
-			if arm.FastModeOnly {
-				continue
-			}
-			samples = append(samples, TrainingSample{
-				QueryID:  item.QueryID,
-				Features: feats,
-				ModelID:  arm.ID,
-				Passed:   item.ArmOutcomes[arm.ID],
-			})
-		}
-	}
-	tw := FitTrainedWeights(samples, catalog, 424242)
+	catalog, tw := getFixtureWeights()
 	r := NewEnsoRouter(catalog, tw)
 	r.SetOrgPolicy("org-ent", ScopePolicy{PlanTier: PlanEnterprise, HasPlanTier: true})
 	return r, tw, catalog
@@ -617,7 +642,10 @@ func TestRoutingDecisionSubMillisecondLatency(t *testing.T) {
 
 // 13. Quantitative verification of research hypotheses H1-H4 on live benchmark suite.
 func TestHypothesesVerdictsHold(t *testing.T) {
-	rep := RunBenchmarkSuite(DefaultEvalSeed)
+	if testing.Short() {
+		t.Skip("skipping full benchmark sweep in -short mode")
+	}
+	rep := getDefaultBenchmarkReport()
 
 	byName := make(map[string]PolicyEvalMetrics)
 	for _, p := range rep.DensePolicies {
@@ -672,12 +700,15 @@ func TestHypothesesVerdictsHold(t *testing.T) {
 
 // 14. Drift lock: committed testdata/results.json must match live RunBenchmarkSuite bit-for-bit.
 func TestCommittedResultsJSONMatchesLiveCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full benchmark drift check in -short mode")
+	}
 	path := filepath.Join("testdata", "results.json")
 	committed, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	live, err := MarshalBenchmarkJSON(RunBenchmarkSuite(DefaultEvalSeed))
+	live, err := MarshalBenchmarkJSON(getDefaultBenchmarkReport())
 	if err != nil {
 		t.Fatalf("marshal live suite: %v", err)
 	}
