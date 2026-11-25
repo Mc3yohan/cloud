@@ -133,11 +133,14 @@ type ModelArm struct {
 	Provider                 string   `json:"provider"`
 	InputUSDPerMTok          float64  `json:"input_usd_per_mtok"`
 	OutputUSDPerMTok         float64  `json:"output_usd_per_mtok"`
+	PriceSource              string   `json:"price_source,omitempty"`
 	ZeroRetention            bool     `json:"zero_retention"`
 	RetentionDays            int      `json:"retention_days"`
 	ThinkingFamily           string   `json:"thinking_family"`
 	MandatoryThinking        bool     `json:"mandatory_thinking"`
 	SupportsForcedToolChoice bool     `json:"supports_forced_tool_choice"`
+	SupportsVision           bool     `json:"supports_vision,omitempty"`
+	ContextWindow            int      `json:"context_window,omitempty"`
 	MinPlanTier              PlanTier `json:"min_plan_tier"`
 	FastModeCapable          bool     `json:"fast_mode_capable"`
 	FastModeOnly             bool     `json:"fast_mode_only"`
@@ -145,6 +148,7 @@ type ModelArm struct {
 	MedianTPOTMs             float64  `json:"median_tpot_ms"`
 	RuntimeDigest            string   `json:"runtime_digest"`
 	CacheConnector           string   `json:"cache_connector"`
+	Fallbacks                []string `json:"fallbacks,omitempty"`
 }
 
 // BlendedUSDPerMTok returns a standard 3:1 input-to-output blended token rate
@@ -214,9 +218,11 @@ func EstimateLatencyMs(arm ModelArm, outTokens int) int {
 	return int(total)
 }
 
-// DefaultCatalog returns the canonical 10-arm multi-provider Enso model pool
-// spanning cheap chat, code specialists, mandatory reasoners, 30-day retention
-// external endpoints, fast-mode SKUs, and enterprise frontier tiers.
+// DefaultCatalog returns a synthetic 10-arm unit-test fixture catalog used
+// strictly for deterministic unit tests of capability gates, policy folding,
+// and offline synthetic fixtures. Production and acceptance benchmarks MUST
+// consume canonical hanzoai/ai conf/models.yaml via LoadHanzoModelsYAML +
+// BuildCatalogArms rather than this synthetic fixture.
 func DefaultCatalog() []ModelArm {
 	return []ModelArm{
 		{

@@ -50,14 +50,14 @@
     {
       "policy_name": "random_router",
       "queries": 600,
-      "accuracy": 0.7533,
-      "quality_retention_pct": 80.57,
-      "blended_usd_per_mtok": 5.94,
-      "usd_per_1k_queries": 9.4719,
-      "blended_cost_saving_pct": 71.73,
-      "usd_cost_saving_pct": 73.03,
-      "mean_latency_ms": 6133.69,
-      "p95_latency_ms": 17379
+      "accuracy": 0.7667,
+      "quality_retention_pct": 82,
+      "blended_usd_per_mtok": 6.42,
+      "usd_per_1k_queries": 10.8238,
+      "blended_cost_saving_pct": 69.44,
+      "usd_cost_saving_pct": 69.18,
+      "mean_latency_ms": 6637.99,
+      "p95_latency_ms": 19731
     },
     {
       "policy_name": "static_rule_prefer(HIP-0510)",

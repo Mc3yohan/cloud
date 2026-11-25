@@ -284,8 +284,55 @@ func FitTrainedWeights(samples []TrainingSample, catalog []ModelArm, seed uint64
 		PlattHybrid:     plattHyb,
 		SampleCount:     len(cleanSamples),
 	}
+	sanitizeTrainedWeights(tw)
 	tw.RouterModelRevision, tw.CalibrationRevision = computeWeightDigests(tw)
 	return tw
+}
+
+func sanitizeTrainedWeights(tw *TrainedWeights) {
+	clampFinite := func(x, lo, hi float64) float64 {
+		if !isFinite(x) {
+			return 0
+		}
+		if x < lo {
+			return lo
+		}
+		if x > hi {
+			return hi
+		}
+		return x
+	}
+	for d := 0; d < FeatureDim; d++ {
+		for k := 0; k < LatentRank; k++ {
+			tw.U[d][k] = clampFinite(tw.U[d][k], -25, 25)
+		}
+	}
+	for m := range tw.V {
+		for k := 0; k < LatentRank; k++ {
+			tw.V[m][k] = clampFinite(tw.V[m][k], -25, 25)
+		}
+	}
+	for m := range tw.MFBias {
+		tw.MFBias[m] = clampFinite(tw.MFBias[m], -25, 25)
+	}
+	for m := range tw.LogisticW {
+		for d := 0; d < FeatureDim; d++ {
+			tw.LogisticW[m][d] = clampFinite(tw.LogisticW[m][d], -50, 50)
+		}
+	}
+	fixPlatt := func(ps []PlattParams) {
+		for i := range ps {
+			if !isFinite(ps[i].Alpha) {
+				ps[i].Alpha = 1.0
+			}
+			if !isFinite(ps[i].Beta) {
+				ps[i].Beta = 0.0
+			}
+		}
+	}
+	fixPlatt(tw.PlattMF)
+	fixPlatt(tw.PlattLR)
+	fixPlatt(tw.PlattHybrid)
 }
 
 func computeWeightDigests(tw *TrainedWeights) (string, string) {
@@ -309,6 +356,19 @@ func computeWeightDigests(tw *TrainedWeights) (string, string) {
 	mSum := sha256.Sum256(modelPayload)
 	cSum := sha256.Sum256(calPayload)
 	return "enso-w-" + hex.EncodeToString(mSum[:8]), "cal_" + hex.EncodeToString(cSum[:8])
+}
+
+func clampWeight(x, lim float64) float64 {
+	if !isFinite(x) {
+		return 0
+	}
+	if x > lim {
+		return lim
+	}
+	if x < -lim {
+		return -lim
+	}
+	return x
 }
 
 func rawMFLogit(u *[FeatureDim][LatentRank]float64, v [][LatentRank]float64, b []float64, x FeatureVec, m int) float64 {
@@ -410,14 +470,16 @@ func fitMatrixFactorization(samples []TrainingSample, armIdx map[string]int, num
 			pred := sigmoid(logit)
 			err := pred - s.Passed
 
-			b[m] -= lr * (err + 0.002*b[m])
+			b[m] = clampWeight(b[m]-lr*(err+0.002*b[m]), 25.0)
 			for k := 0; k < LatentRank; k++ {
 				vmk := v[m][k]
-				v[m][k] -= lr * (err*q[k] + l2V*vmk)
+				vStep := clampWeight(err*q[k]+l2V*vmk, 10.0)
+				v[m][k] = clampWeight(vmk-lr*vStep, 25.0)
 				gradQ := err * vmk
 				for d := 0; d < FeatureDim; d++ {
 					if s.Features[d] != 0 {
-						u[d][k] -= lr * (gradQ*s.Features[d] + l2U*u[d][k])
+						uStep := clampWeight(gradQ*s.Features[d]+l2U*u[d][k], 10.0)
+						u[d][k] = clampWeight(u[d][k]-lr*uStep, 25.0)
 					}
 				}
 			}
@@ -638,7 +700,7 @@ func fitPerArmLogisticIRLS(samples []TrainingSample, armIdx map[string]int, numA
 				}
 			}
 
-			step, ok := solveLinear24(hess, grad)
+			step, ok := solveLinear(hess, grad)
 			if !ok {
 				break
 			}
@@ -659,7 +721,7 @@ func fitPerArmLogisticIRLS(samples []TrainingSample, armIdx map[string]int, numA
 	return weights
 }
 
-func solveLinear24(a [FeatureDim][FeatureDim]float64, b [FeatureDim]float64) ([FeatureDim]float64, bool) {
+func solveLinear(a [FeatureDim][FeatureDim]float64, b [FeatureDim]float64) ([FeatureDim]float64, bool) {
 	var aug [FeatureDim][FeatureDim + 1]float64
 	for i := 0; i < FeatureDim; i++ {
 		for j := 0; j < FeatureDim; j++ {
@@ -989,7 +1051,12 @@ func (r *EnsoRouter) Route(req RouteRequest, strategy RouterStrategy) (RouteDeci
 		}
 	}
 
-	feats := ExtractFeatures(req)
+	var feats FeatureVec
+	if req.PreExtractedFeatures != nil {
+		feats = *req.PreExtractedFeatures
+	} else {
+		feats = ExtractFeatures(req)
+	}
 	chosen, predQ, maxQ, effFloor, fallback, routeErr := selectModelArm(eligible, feats, req, pol, weights, strategy, inTok, outTok)
 	if routeErr != nil {
 		return RouteDecision{}, routeErr
@@ -1147,7 +1214,20 @@ func selectModelArm(
 
 	case StrategyRandom:
 		h := fnv.New64a()
-		_, _ = h.Write([]byte(req.Org + ":" + req.RequestID + ":" + req.Prompt))
+		_, _ = h.Write([]byte(req.Org + ":" + req.RequestID))
+		if req.RequestID == "" {
+			_, _ = h.Write([]byte(":" + req.Prompt))
+		}
+		if req.RequestID == "" && req.Prompt == "" {
+			var b [8]byte
+			for d := 0; d < FeatureDim; d++ {
+				bits := math.Float64bits(feats[d])
+				for k := 0; k < 8; k++ {
+					b[k] = byte(bits >> (8 * k))
+				}
+				_, _ = h.Write(b[:])
+			}
+		}
 		rng := NewRNG(h.Sum64())
 		win := scored[rng.IntN(len(scored))]
 		return win.arm, win.quality, maxQ, 0, "", nil
@@ -1388,7 +1468,7 @@ func (r *EnsoRouter) RetrainOrgPromoteOrKeep(
 	if org == "" {
 		return RetrainVerdict{}, &RouteError{Code: ErrCodeUnauthorizedOrg, HTTPStatus: 403, Message: "empty org"}
 	}
-	if !ValidateScopeIdentifier(org, false) || !isFinite(costWeight) || costWeight < 0 || !isFinite(minRequiredGain) {
+	if !ValidateScopeIdentifier(org, false) || !isFinite(costWeight) || costWeight < 0 || !isFinite(minRequiredGain) || minRequiredGain < 0 {
 		return RetrainVerdict{}, &RouteError{Code: ErrCodeInvalidRequestParams, HTTPStatus: 400, Message: "invalid org or non-finite/negative retrain parameters"}
 	}
 	r.mu.RLock()
@@ -1397,6 +1477,22 @@ func (r *EnsoRouter) RetrainOrgPromoteOrKeep(
 
 	candidate := FitTrainedWeights(orgTrainSamples, catalog, seed)
 
+	// Snapshot incumbent and per-item effective policies under RLock so held-out
+	// evaluation runs outside the exclusive write lock (avoiding stalling Route() readers).
+	r.mu.RLock()
+	snapIncumbent := r.orgWeights[org]
+	if snapIncumbent == nil {
+		snapIncumbent = r.baseWeights
+	}
+	itemPols := make([]EffectivePolicy, len(heldOut))
+	for i, item := range heldOut {
+		itemPols[i] = r.effectivePolicyLocked(org, item.Request.Project)
+	}
+	r.mu.RUnlock()
+
+	incUtil, incCount := evaluateWeightsUtilityPerItem(catalog, itemPols, snapIncumbent, heldOut, costWeight)
+	candUtil, candCount := evaluateWeightsUtilityPerItem(catalog, itemPols, candidate, heldOut, costWeight)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1404,9 +1500,14 @@ func (r *EnsoRouter) RetrainOrgPromoteOrKeep(
 	if liveIncumbent == nil {
 		liveIncumbent = r.baseWeights
 	}
-	pol := r.effectivePolicyLocked(org, "")
-	incUtil, incCount := evaluateWeightsUtility(catalog, pol, liveIncumbent, heldOut, costWeight)
-	candUtil, candCount := evaluateWeightsUtility(catalog, pol, candidate, heldOut, costWeight)
+	if liveIncumbent != snapIncumbent {
+		// Re-evaluate against the updated live incumbent if a concurrent retrain won first.
+		for i, item := range heldOut {
+			itemPols[i] = r.effectivePolicyLocked(org, item.Request.Project)
+		}
+		incUtil, incCount = evaluateWeightsUtilityPerItem(catalog, itemPols, liveIncumbent, heldOut, costWeight)
+		candUtil, candCount = evaluateWeightsUtilityPerItem(catalog, itemPols, candidate, heldOut, costWeight)
+	}
 
 	verdict := RetrainVerdict{
 		Scope:            org,
@@ -1431,25 +1532,37 @@ func (r *EnsoRouter) RetrainOrgPromoteOrKeep(
 	return verdict, nil
 }
 
-func evaluateWeightsUtility(catalog []ModelArm, pol EffectivePolicy, w *TrainedWeights, heldOut []EvalQueryGroundTruth, costWeight float64) (float64, int) {
+func evaluateWeightsUtilityPerItem(catalog []ModelArm, pols []EffectivePolicy, w *TrainedWeights, heldOut []EvalQueryGroundTruth, costWeight float64) (float64, int) {
 	if len(heldOut) == 0 {
 		return 0, 0
 	}
 	var sum float64
 	var counted int
-	for _, item := range heldOut {
+	for idx, item := range heldOut {
+		pol := pols[idx]
+		req := item.Request
 		var elig []ModelArm
 		for _, arm := range catalog {
-			if ok, _ := CheckCapabilityGates(arm, item.Request, pol); ok {
+			if len(item.ArmOutcomes) > 0 {
+				if _, hasLabel := item.ArmOutcomes[arm.ID]; !hasLabel {
+					continue
+				}
+			}
+			if ok, _ := CheckCapabilityGates(arm, req, pol); ok {
 				elig = append(elig, arm)
 			}
 		}
 		if len(elig) == 0 {
 			continue
 		}
-		feats := ExtractFeatures(item.Request)
-		inTok, outTok := ResolveTokenEstimates(item.Request)
-		chosen, _, _, _, _, err := selectModelArm(elig, feats, item.Request, pol, w, StrategyEnsoHybridConstrained, inTok, outTok)
+		var feats FeatureVec
+		if req.PreExtractedFeatures != nil {
+			feats = *req.PreExtractedFeatures
+		} else {
+			feats = ExtractFeatures(req)
+		}
+		inTok, outTok := ResolveTokenEstimates(req)
+		chosen, _, _, _, _, err := selectModelArm(elig, feats, req, pol, w, StrategyEnsoHybridConstrained, inTok, outTok)
 		if err != nil {
 			continue
 		}

@@ -31,6 +31,9 @@ const (
 	GateZeroRetention     GateName = "zero_retention"
 	GateThinkingFamily    GateName = "thinking_family"
 	GateForcedToolChoice  GateName = "forced_tool_choice"
+	GateVisionCapability  GateName = "vision_capability"
+	GateContextWindow     GateName = "context_window"
+	GateUnavailableModel  GateName = "unavailable_model"
 	GatePlanEntitlement   GateName = "plan_entitlement"
 	GateFastModeCapable   GateName = "fast_mode_capability"
 	GateFastModePrepaid   GateName = "fast_mode_prepaid"
@@ -148,6 +151,13 @@ type RouteRequest struct {
 
 	Prompt   string                `json:"prompt"`
 	Messages []ConversationMessage `json:"messages,omitempty"`
+	HasMedia bool                  `json:"has_media,omitempty"`
+
+	// PreExtractedFeatures allows offline content-free benchmark corpora to supply
+	// exact FeatureVec values without redistributing third-party prompt text.
+	PreExtractedFeatures *FeatureVec `json:"-"`
+	// UnavailableModels marks provider/model outages for fault-injection and live health gating.
+	UnavailableModels map[string]bool `json:"-"`
 
 	EstInputTokens  int `json:"est_input_tokens"`
 	EstOutputTokens int `json:"est_output_tokens"`
@@ -373,6 +383,18 @@ func ValidateRequestSemantics(req RouteRequest, catalogByID map[string]ModelArm)
 		}
 	}
 
+	if req.PreExtractedFeatures != nil {
+		for d, fv := range *req.PreExtractedFeatures {
+			if !isFinite(fv) || math.Abs(fv) > 1e6 {
+				return &RouteError{
+					Code:       ErrCodeInvalidRequestParams,
+					HTTPStatus: 400,
+					Message:    fmt.Sprintf("pre_extracted_features[%d] must be finite and within [-1e6, 1e6]", d),
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -385,7 +407,20 @@ func CheckCapabilityGates(arm ModelArm, req RouteRequest, pol EffectivePolicy) (
 		return false, GateRuntimeProvenance
 	}
 
+	// 0b. Live servability / outage gate: skip disconnected or unavailable arms.
+	if len(req.UnavailableModels) > 0 && req.UnavailableModels[arm.ID] {
+		return false, GateUnavailableModel
+	}
+
 	inTok, outTok := ResolveTokenEstimates(req)
+
+	// 0c. Vision and context-window capability mismatch gates.
+	if req.HasMedia && !arm.SupportsVision {
+		return false, GateVisionCapability
+	}
+	if arm.ContextWindow > 0 && inTok+outTok > arm.ContextWindow {
+		return false, GateContextWindow
+	}
 
 	// 1. Zero Data Retention gate (HIP-1345 §2.6).
 	if (pol.RequireZeroRetention || req.RequireZeroRetention) && (!arm.ZeroRetention || arm.RetentionDays > 0) {

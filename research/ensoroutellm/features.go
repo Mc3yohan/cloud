@@ -4,16 +4,15 @@
 package ensoroutellm
 
 import (
-	"hash/fnv"
 	"math"
 	"strings"
 	"unicode"
 )
 
 // FeatureDim is the fixed width of Enso's content-free routing feature vector:
-//   - [0..7]   8 domain lexical/task signals
+//   - [0..7]   8 general domain lexical/task signals
 //   - [8..14]  7 structural & protocol complexity signals
-//   - [15..22] 8 signed FNV-1a hashed token/n-gram projections
+//   - [15..22] 8 signed FNV-1a hashed word/bigram projections
 //   - [23]     1 constant intercept (1.0)
 const FeatureDim = 24
 
@@ -162,14 +161,31 @@ func ExtractFeatures(req RouteRequest) FeatureVec {
 	}
 	v[14] = thinkingSignal
 
-	// 3. Signed FNV-1a hashed word/bigram projections into 8 dense buckets.
-	words := tokenizeWords(lower)
+	// 3. Zero-allocation signed FNV-1a hashed word/bigram projections into 8 dense buckets.
 	var hashProj [8]float64
-	for i, w := range words {
-		addSignedHash(&hashProj, w, 1.0)
-		if i+1 < len(words) {
-			addSignedHash(&hashProj, w+"_"+words[i+1], 0.85)
+	var prevWord string
+	start := -1
+	flushWord := func(word string) {
+		addSignedHashInline(&hashProj, word, "", 1.0)
+		if prevWord != "" {
+			addSignedHashInline(&hashProj, prevWord, word, 0.85)
 		}
+		prevWord = word
+	}
+	for i, r := range lower {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if start < 0 {
+				start = i
+			}
+		} else if start >= 0 {
+			if i-start >= 2 {
+				flushWord(lower[start:i])
+			}
+			start = -1
+		}
+	}
+	if start >= 0 && len(lower)-start >= 2 {
+		flushWord(lower[start:])
 	}
 	var projNorm float64
 	for i := 0; i < 8; i++ {
@@ -197,31 +213,26 @@ func ExtractFeatures(req RouteRequest) FeatureVec {
 	return v
 }
 
-func tokenizeWords(lower string) []string {
-	var out []string
-	start := -1
-	for i, r := range lower {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			if start < 0 {
-				start = i
-			}
-		} else if start >= 0 {
-			if i-start >= 2 {
-				out = append(out, lower[start:i])
-			}
-			start = -1
+// addSignedHashInline computes exact 64-bit FNV-1a over a (or a+"_"+b when b != "")
+// with zero heap allocations.
+func addSignedHashInline(buckets *[8]float64, a, b string, weight float64) {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	var sum uint64 = offset64
+	for i := 0; i < len(a); i++ {
+		sum ^= uint64(a[i])
+		sum *= prime64
+	}
+	if b != "" {
+		sum ^= uint64('_')
+		sum *= prime64
+		for i := 0; i < len(b); i++ {
+			sum ^= uint64(b[i])
+			sum *= prime64
 		}
 	}
-	if start >= 0 && len(lower)-start >= 2 {
-		out = append(out, lower[start:])
-	}
-	return out
-}
-
-func addSignedHash(buckets *[8]float64, token string, weight float64) {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(token))
-	sum := h.Sum64()
 	idx := sum & 7
 	sign := 1.0
 	if (sum>>8)&1 == 1 {
