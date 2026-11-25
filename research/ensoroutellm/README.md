@@ -1,214 +1,104 @@
-# Quality-Constrained Enso Model Routing (RouteLLM) — Reproducible Experiment & Reference Engine (`cloud#34`, `cloud#27`)
+# Quality-Constrained Enso Model Routing Benchmark & Reference Scorer (`hanzoai/cloud#59`)
 
-**Bounties**: [hanzoai/cloud#34](https://github.com/hanzoai/cloud/issues/34) (*[Bounty #17] Wave 1 Priority #4 — Research + Implementation Bounty*) · [hanzoai/cloud#27](https://github.com/hanzoai/cloud/issues/27) (*Quality-constrained model routing for Enso*)  
-**Umbrella & Related HIPs**: [HIP-1345 §2.6](https://github.com/hanzoai/hips/blob/main/HIPs/hip-1345-agent-aware-model-serving-and-cache-reuse.md) (*Quality-Constrained Model Routing*) · [HIP-0510](https://github.com/hanzoai/hips/blob/main/HIPs/hip-0510-enso-learned-router.md) (*Enso — The Router Family & Learned Per-Request Routing*) · [HIP-1332](https://github.com/hanzoai/hips/blob/main/HIPs/hip-1332-kai-the-decision-model.md) (*Kai — The Decision Plane*) · [HIP-1348 §1.1–§1.2](https://github.com/hanzoai/hips/blob/main/HIPs/hip-1348-reliable-economical-and-verifiable-ai-infrastructure.md) (*Tenant Ledger & `budget_exhausted` Taxonomy*)  
-**Primary Paper**: I. Ong, A. Almahairi, V. Wu, W.-L. Chiang, T. Wu, J. E. Gonzalez, M. W. Kadous, I. Stoica, *"RouteLLM: Learning to Route LLMs with Preference Data,"* ICLR 2025 ([proceedings](https://proceedings.iclr.cc/paper_files/paper/2025/hash/5503a7c69d48a2f86fc00b3dc09de686-Abstract-Conference.html), [arXiv:2406.18665](https://arxiv.org/abs/2406.18665))  
-**Upstream Reference Repository**: <https://github.com/lm-sys/RouteLLM> (`v0.2.0`, default branch `main`)
-
-This directory (`research/ensoroutellm`) and CLI (`research/ensoroutellmsim`) deliver a **clean-room, dependency-free Go (`CGO_ENABLED=0`) cost-quality Enso router and 4-part evaluation suite** combining bilinear Matrix Factorization (`x^T W p_m`), L2-regularized Newton-IRLS Logistic predictors, and out-of-fold Platt probability calibration behind **deterministic `HIP-1345 §2.6` hard capability, retention, reasoning-continuity, and multi-tenant entitlement gates**.
-
-> **Provenance & Scope Notice**: Zero Python source code, HuggingFace weights, OpenAI embeddings, or Chatbot Arena datasets were imported from `lm-sys/RouteLLM`. All Go code and deterministic benchmark generators here are original implementations licensed under `Apache-2.0 OR MIT` with zero modifications to `go.mod`. Published numbers in `arXiv:2406.18665` belong to the paper authors' environment and are not claimed as Hanzo production figures until validated on live Enso traffic.
+**Issues / Tracking**: [hanzoai/cloud#34](https://github.com/hanzoai/cloud/issues/34), [hanzoai/cloud#27](https://github.com/hanzoai/cloud/issues/27), [HIP-1345 §2.6](https://github.com/hanzoai/hips/blob/main/HIPs/hip-1345-agent-aware-model-serving-and-cache-reuse.md), [HIP-0510](https://github.com/hanzoai/hips/blob/main/HIPs/hip-0510-enso-learned-router.md)  
+**Primary Paper**: I. Ong et al., *"RouteLLM: Learning to Route LLMs with Preference Data,"* ICLR 2025 ([arXiv:2406.18665](https://arxiv.org/abs/2406.18665))  
+**Scope & Ownership**: Experimental benchmark harness and candidate scorer in `hanzoai/cloud/research/`. Reusable production routing belongs in the canonical Enso router in `hanzoai/ai/router` (`POST /route` adapter or in-process scorer); this package does not maintain a duplicate production router or duplicate pricing registry.
 
 ---
 
-## 1. Primary Paper Summary & Full Upstream License Audit
+## 1. Acceptance Contract Coverage
 
-### 1.1 Paper Summary & Production Gaps Relative to Enso (`HIP-0510` / `HIP-1345 §2.6`)
-
-Ong et al. (ICLR 2025) train lightweight binary routers (`mf`, `sw_ranking`, `bert`, `causal_llm`) on pairwise preference battles (`gpt-4-1106-preview` vs. `mixtral-8x7b`) to estimate strong-model win probability $P(\text{win}_{\text{strong}} \mid q)$ and route queries below a calibrated threshold $\tau$ to a weaker model, evaluating cost-quality curves via **APGR** (*Average Percentage of Performance Gap Recovered*) and **CPT** (*Cost-Performance Threshold*).
-
-Adapting RouteLLM to **Hanzo Enso** (`HIP-0510` + `HIP-1345 §2.6`) requires solving four production constraints absent in upstream `lm-sys/RouteLLM`:
-
-1. **Multi-Arm ($M > 2$) Capability-Heterogeneous Pool**: Production gateways route across $10+$ models with specialist strengths (e.g., `zen-4-coder` beating generalists on systems code at `$1.20/$4.80` MTok, `zen-4-thinking` excelling on formal math at `$4.50/$18.00` vs. `$12/$48` frontier), rather than a single weak/strong pair.
-2. **Hard Capability, Retention & Entitlement Gates Before Cost Scoring**: Upstream optimizes scalar cost vs. win-rate with no notion of `zero_retention` (ZDR), `thinking_family` turn locks, `forced_tool_choice` support, multi-tenant `plan_entitlement`, or `fast_mode` prepaid balances.
-3. **Zero Third-Party Embedding Egress & CPU-Microsecond Budget**: Upstream `mf` and `sw_ranking` require calling OpenAI's commercial `text-embedding-3-small` API on every routing request — adding network millisecond tail latency (violating `HIP-0510`) and leaking prompt text to a third party (violating `HIP-1332 §20` & ZDR).
-4. **Content-Free Online Flywheel & Promote-or-Keep Gating**: Per `HIP-0510 §2–§3`, Enso persists only `(features, routed_model, reward)` (never prompt text) and promotes retrained weights only when held-out utility beats the incumbent.
-
-### 1.2 Upstream License, Dataset & Checkpoint Audit (`lm-sys/RouteLLM`)
-
-| Audited Artifact | Upstream Identifier | License / Terms | Verdict for `hanzoai/cloud` |
-| --- | --- | --- | --- |
-| Primary paper | Ong et al., ICLR 2025 (`arXiv:2406.18665`) | Public academic publication | Mathematical concepts (bilinear MF, APGR, CPT) re-implemented from scratch in Go. |
-| Repository source code | `github.com/lm-sys/RouteLLM` (`LICENSE`) | **Apache-2.0** (includes §3 contributor patent grant; no `NOTICE` restrictions) | Permissive, **but zero Python code was copied or transpiled**; clean-room Go stdlib implementation (`Apache-2.0 OR MIT`). |
-| Pretrained `causal_llm` router weights | `routellm/causal_llm_gpt4_augmented` (`config.example.yaml`) | **Meta Llama 3 Community License** + GPT-4 synthetic labels | **Excluded.** Non-Apache/MIT model license and OpenAI ToS training restriction. |
-| Pretrained `mf` / `bert` weights & embeddings | `routellm/mf_gpt4_augmented`, `routellm/arena_battles_embeddings` | Trained on `lmsys-arena-human-preference-55k` + `routellm/gpt4_judge_battles`; runtime requires `OPENAI_API_KEY` | **Excluded.** Avoids upstream provider ToS restrictions and mandatory OpenAI embedding API egress (`HIP-1332 §20`). |
-| Python runtime dependencies | `torch`, `transformers`, `litellm`, `openai`, `sglang`, `scikit-learn` | Mixed BSD / MIT / Apache-2.0 | **Excluded.** Zero external dependencies (`CGO_ENABLED=0`, `go.mod` untouched). |
+| Requirement | Implementation in `research/ensoroutellm` |
+| --- | --- |
+| **Public evaluation** | Real objective ground-truth evaluations from pinned **LiveBench** (`Apache-2.0` repo, `n = 318` questions x `11` models = `3,498` evaluations across `coding`, `language`, `instruction_following`). Content-free Go feature vectors (full IEEE-754 float64 precision) + `ShippingClassify` tags + scores committed (`testdata/livebench_public_features.jsonl`) with zero third-party prompt text redistribution and deterministic rebuild script (`scripts/prepare_livebench_eval.py`). |
+| **Model catalog** | Parses canonical `hanzoai/ai/conf/models.yaml` directly via stdlib parser (`models_yaml.go`, exact LF snapshot of `hanzoai/ai@7d0b017:conf/models.yaml`, overridable with `-models-yaml`) plus optional external pricing snapshot JSON (`-pricing-json`, customer token rates from `hanzoai/ai/conf/models.yaml` and `hanzoai/ai/controllers/model_pricing.go`, omitted automatically when `-corpus` is overridden). Excludes non-chat entries (`kai`, `zen-scribe`, embeddings, image/video, hidden/`router:*`) and defaults unspecified capabilities (`ZeroRetention`, `Tools`, `Vision`) fail-closed to `false`. |
+| **Baseline** | Port of shipping `hanzoai/ai/router` (`shipping_baseline.go`: `ShippingClassify`, `ShippingPolicy.ForTask`, `ShippingClient.RouteDecisionFor`) evaluated alongside a cross-validated single-arm budget baseline (`best_single_budget_arm_cv`) and two shipping-router modes: unmodified `conf/models.yaml` (`hanzo_ai_router_canonical`) and a catalog-agnostic pool-adapted specialist policy (`hanzo_ai_router_pool_adapted`). |
+| **Architecture** | Zero `go.mod` edits; zero duplicate production pricing table; `EngineAdapter` / `NewEnsoEngineHTTPHandler` adapts the candidate scorer directly to `hanzoai/ai/router/client.go`'s `/route` and `/route/observe` contract with bounded observation buffering and fail-closed `Slo.MaxCost` handling. |
+| **Quality** | 5-fold stratified CV reporting out-of-fold accuracy at nested-CV matched budget (tolerance selected strictly via 3-fold stratified inner OOF CV with a 1-SE spend safety bound, never peeking at held-out outer test folds; paired 500-resample bootstrap 95% CIs), 10-bin reliability calibration (`ECE`, `Brier`), and 12-point Pareto frontier (`APGR` normalized on `[weak_ratio, 1.0]`, `CPT80`, `CPT90` on standard `usd / strong_usd` spend). |
+| **Performance** | Live CPU routing overhead quantiles (`mean`, `p50`, `p95`, `p99` ns, unbatched `batchSize=1` across all paths) and sustained throughput (`1`- and `8`-goroutine QPS) at the corpus median prompt size (`1,856` bytes), comparing `shipping_heuristic`, `candidate_hybrid`, and `candidate_with_ledger` (exercising the in-memory ledger mutex), plus end-to-end model latency quantiles (`p50/p95/p99` ms). |
+| **Reliability** | Automated 14-check catalog-agnostic fault-injection suite (`RunReliabilityAudit`) covering budget exhaustion (`402 tenant_ledger` + `422` SLO including `$0/$0` free-arm awareness), unavailable/disconnected models (`UnavailableModels` + `Allow` floor), capability mismatch (`vision`, `forced_tool_choice`, `context_window`, non-chat exclusion), and fallback behavior (HTTP `500`, timeout, cold-start, strict quality floor). |
+| **Reproducibility** | Deterministic `SplitMix64` seeds (`20261134`), LF-normalized SHA-256 digests + `.gitattributes`, pinned HuggingFace revisions (`testdata/dataset_manifest.json`, enforced by `TestAcceptanceSchemaAndManifestContract`), and single-command CLI (`results/PROTOCOL.md`). |
+| **Private qualification** | `-corpus <private.jsonl>` + `-models-yaml <path>` emits strictly aggregate-only JSON (`aggregate_only: true`, schema `results/acceptance_schema.json`) with zero prompts, zero query IDs, zero per-item labels, and zero concrete model IDs (`TestAggregateOnlyReceiptContainsNoPrivateDataAndSupportsCustomPrivateCatalogs`, including canary model-ID leak test). Supports sparse per-query `arm_outcomes` and tracks `routed_queries` / `unrouted_queries` explicitly. |
+| **Production integration** | Gated via promote-or-keep utility check (`RetrainOrgPromoteOrKeep`) and wired cleanly into `hanzoai/ai/router` only after internal `hanzoai/enso-bench` qualification passes. |
 
 ---
 
-## 2. Canonical Architecture & Matched Baselines
+## 2. Public Evaluation Results (`LiveBench`, `n = 318`, `11` Canonical Hanzo Models)
 
-### 2.1 Enso + Kai + Zen Boundary (`HIP-0510`, `HIP-1332`, `HIP-1345 §2.5–§2.6`)
+Evaluated via 5-fold stratified cross-validation (`seed = 20261134`, `go1.26.11 linux/amd64`). Raw aggregate receipt committed at [`testdata/acceptance_results.json`](testdata/acceptance_results.json) (exact parity verified on all deterministic metrics against the raw LiveBench prompt JSONL).
 
-1. **Deterministic Policy Authority First (`gates.go`, `catalog.go`)**:
-   - Request semantics are validated (`ValidateRequestSemantics`, returning HTTP `400` on mandatory-thinking parameter conflicts).
-   - Tenant policy resolves in strict **narrow-only** precedence `platform ("*") -> org -> project` (`FoldPolicies`): a project sub-scope can tighten ZDR, lower cost/latency ceilings, raise quality floors, or intersect allowlists, **never** escalate `PlanTier` or re-enable blocked providers/models.
-   - `CheckCapabilityGates` filters the 10-arm catalog across 8 deterministic checks (`0–7`, organized into 7 logical gate groups):
-     0. `runtime_provenance` (`HIP-1345 §1.3`: non-empty `RuntimeDigest` & `CacheConnector`)
-     1. `zero_retention` (`ZeroRetention == true && RetentionDays == 0` when ZDR required)
-     2. `thinking_family` (pins active `PinnedTurnModel` within a turn; enforces explicit or message-inferred `PriorThinkingFamily` continuity when required; filters `MandatoryThinking` arms on `ThinkingOff`, `temperature != 1.0`, or `max_output_tokens < 128`)
-     3. `forced_tool_choice` (`SupportsForcedToolChoice` required when `tool_choice` is `required` or `named_function`)
-     4. `plan_entitlement` (`free < starter < pro < team < enterprise` + `EntitledModels` grants + `BlockedProviders`/`BlockedModels` opt-outs)
-     5. `fast_mode_capability` (restricts `fast_mode=true` to `FastModeCapable` arms and blocks `FastModeOnly` arms when `fast_mode=false`)
-     6. `slo_ceiling` (`MaxCostMicros` and `MaxLatencyMs` ceilings with overflow-safe saturation)
-     7. `fast_mode_prepaid` (fail-closed `budget_exhausted`, `layer="tenant_ledger"` & `BillingTopUpHint=true` when prepaid balance is missing, $\le 0$, or below estimated cost)
-2. **Non-Generative Calibrated Cost-Quality Decision (`features.go`, `router.go`)**:
-   - `ExtractFeatures` maps prompt + metadata to a content-free `FeatureVec` ($D = 24$: 8 domain lexical signals, 7 structural/protocol signals, 8 signed FNV-1a hashed word/bigram projections, and bias `1.0`) on CPU in microseconds.
-   - `FitTrainedWeights` trains **both** a rank-$8$ bilinear **Matrix Factorization** predictor ($z_{\text{MF}}(x, m) = b_m + (U^T x)^T v_m$, matching `HIP-0510 §1` `x^T W p_m`) and per-arm L2-regularized **Newton-IRLS Logistic** models ($z_{\text{LR}}(x, m) = w_m^T x$), calibrated via **3-fold query-grouped out-of-fold Platt scaling** ($\hat{p}_m(x) = \sigma(\alpha_m z_m(x) + \beta_m)$).
-   - Among eligible arms meeting $Q_{\text{eff}} = \max(\text{MinFloor}, \text{ReqFloor}, \rho \cdot \hat{p}_{\max} - \tau)$, Enso selects the **lowest-cost** model (tie-breaking by lower latency, then higher $\hat{p}_m$), sanitizes foreign `ThinkingBlocks` (`SanitizeConversationMessages`), and emits a `RouteDecision` carrying `X-Routed-Model`, salted `CacheSalt: "hzo-" + org` (`HIP-1345 §1.1`), `RuntimeDigest`, `RouterModelRevision`, and `CalibrationRevision`.
+Out-of-fold calibration & Pareto metrics (`enso_hybrid`, standard `usd / strong_usd` spend scale, normalized APGR): **`ECE = 0.0168`**, **`Brier = 0.1901`**, **`APGR = 0.9815`**, **`CPT(80%) = 3.01%`**, **`CPT(90%) = 5.47%`**.
 
-### 2.2 Matched Baselines Evaluated on Identical Folds & Seeds
+| Routing Policy | Accuracy | 95% Bootstrap CI | Retention vs Strong | USD / 1k Queries | USD Savings | Model p50 / p95 / p99 ms | Unique Arms |
+| --- | ---: | :---: | ---: | ---: | ---: | :---: | ---: |
+| `always_strong (o1)` | 69.88% | [65.53%, 74.26%] | 100.00% | 29.1714 | 0.00% | 7306 / 13962 / 13962 | 1 |
+| `always_weak (mistral-small)` | 37.38% | [32.63%, 42.00%] | 53.50% | 0.1590 | 99.45% | 1867 / 3659 / 3659 | 1 |
+| `random_router` | 55.11% | [49.40%, 60.17%] | 78.86% | 5.1913 | 82.20% | 4848 / 10068 / 13962 | 11 |
+| `best_single_budget_arm_cv` | 62.65% | [57.46%, 67.23%] | 89.66% | 3.2561 | 88.84% | 4848 / 9456 / 9456 | 2 |
+| `hanzo_ai_router_canonical` | 49.39% | [44.74%, 54.32%] | 70.67% | 4.8622 | 83.33% | 3804 / 7388 / 7388 | 1 |
+| `hanzo_ai_router_pool_adapted` | 63.52% | [58.77%, 68.26%] | 90.91% | 5.6740 | 80.55% | 4848 / 9456 / 9456 | 3 |
+| `routellm_mf_rel(tol=0.04)` | 70.95% | [66.22%, 75.69%] | 101.53% | 12.0321 | 58.75% | 7306 / 13962 / 13962 | 5 |
+| `enso_hybrid_rel(tol=0.00)` | 73.74% | [69.57%, 77.74%] | 105.53% | 16.9078 | 42.04% | 7306 / 13962 / 13962 | 5 |
+| `enso_hybrid_rel(tol=0.01)` | **74.13%** | [69.59%, 78.47%] | **106.09%** | 15.4281 | 47.11% | 7306 / 13962 / 13962 | 5 |
+| `enso_hybrid_rel(tol=0.04)` | 72.03% | [67.46%, 76.59%] | 103.08% | 12.0888 | 58.56% | 7306 / 13962 / 13962 | 5 |
+| **`enso_hybrid_rel(tol=0.10)`** | **71.27%** | [66.32%, 75.56%] | **102.00%** | **5.4490** | **81.32%** | 6565 / 7970 / 13962 | 7 |
+| `enso_hybrid_rel(tol=0.16)` | 68.34% | [63.93%, 72.62%] | 97.80% | 1.5960 | 94.53% | 4130 / 7102 / 7306 | 6 |
 
-- `always_strong(zen-4-max)`: Always selects the highest-capability ZDR frontier model (`$12/$48` MTok).
-- `always_weak(zen-4-flash)`: Always selects the cheapest ZDR model (`$0.15/$0.60` MTok).
-- `random_router`: Uniformly samples among capability-eligible models (`RouteLLM` paper random baseline).
-- `static_rule_prefer(HIP-0510)`: Cold-start coarse task-bucket heuristic (`ClassifyCoarseBucket` + ordered preference walk).
-- `unconstrained_routellm`: Learned cost-quality router operating over the raw catalog **without** `HIP-1345 §2.6` capability/entitlement gates.
-- `routellm_mf_rel(tol=0.04)`: Pure bilinear Matrix Factorization + Platt calibration + `HIP-1345` gates.
-- `enso_hybrid_rel(tol=0.02|0.04|0.06)` & `enso_hybrid_abs(floor=0.80)`: Proposed Hybrid MF + Newton-IRLS Logistic + Platt calibration + `HIP-1345` gates.
+### Matched-Budget Comparison vs. Shipping `hanzoai/ai/router` (Nested 3-Fold Stratified Inner CV + 1-SE Rule)
 
----
+To avoid post-selection optimism, matched-budget tolerances are calibrated strictly inside each outer training fold via full 3-fold stratified inner out-of-fold CV using a one-standard-error spend safety bound (`mean + 1*SE <= baseline spend`) before evaluating once on the held-out outer test fold:
 
-## 3. Falsifiable Hypotheses & Expected Failure Modes (Declared Upfront)
+- **vs. `hanzo_ai_router_canonical` (`conf/models.yaml` verbatim):** `enso_hybrid_nested_cv(med_tol=0.12)` delivers **`+22.08 pp`** (`95% CI [+16.38, +27.55] pp`) at **`-8.13%`** lower spend (`4.4669` vs `4.8622` USD/1k, `budget_matched=true`).
+  - *Baseline disclosure:* On this public 11-model LiveBench overlap, Hanzo's proprietary Zen defaults in `hanzoai/ai@7d0b017:conf/models.yaml` (`zen6-coder`, `zen6-max`, `zen6`, `zen6-flash`, `zen-vl`) are absent from LiveBench public judgments, so `hanzo_ai_router_canonical` falls back to its first servable general fallback (`gpt-4o`, `unique_models_selected = 1`). That is why `hanzo_ai_router_pool_adapted` and `best_single_budget_arm_cv` are reported alongside it as stronger apples-to-apples public baselines.
+- **vs. `hanzo_ai_router_pool_adapted` (pool-mapped specialist heuristic across 3 models):** `enso_hybrid_nested_cv(med_tol=0.12)` delivers **`+6.57 pp`** (`95% CI [+1.61, +11.78] pp`) at **`-7.81%`** lower spend (`5.2308` vs `5.6740` USD/1k, `budget_matched=true`).
+- **vs. `best_single_budget_arm_cv` (training-fold best single model under budget):** The candidate achieves `70.10%` (`5.2308` USD/1k) and `68.34%` (`1.5960` USD/1k, `tol=0.16`) against `62.65%` (`3.2561` USD/1k) for the strongest single budget model.
+- **Why multi-arm routing beats `always_strong (o1)` at `tol <= 0.10`:** LiveBench exposes task specialization across models (`o3-mini` leads `LCB_generation`, `claude-3-7-sonnet` leads `coding_completion` and `plot_unscrambling`, `fireworks/deepseek-v3` leads `paraphrase`, `gpt-4o` leads `typos`, and `o1` dominates `connections`). A per-arm calibrated predictor routes each query to its specialist instead of overpaying for a single model.
 
-- **H1 (Calibrated Cost-Quality Pareto Win)**: On 5-fold stratified cross-validation across multi-domain tasks with intra-domain Easy/Medium/Hard complexity tiers (`n = 600`), `enso_hybrid_rel(tol=0.04)` retains $\ge 96\%$ of `always_strong` accuracy ($\ge 98\%$ at `tol = 0.02`) and beats `static_rule_prefer` by $\ge +5\text{ pp}$ while reducing blended `$/MTok` by $\ge 45\%$ and total USD spend by $\ge 30\%$, achieving out-of-fold `ECE <= 0.03` and `APGR >= 0.80`.
-- **H2 (Bilinear Matrix Factorization Advantage Under Sparse Bandit Feedback)**: On cold-start partial-feedback logs (`n = 180` queries observing only `1` historical arm/query = `85.7%` missing arm labels, modeling `HIP-0510 §1–§3` domain-skewed bandit traffic), shared latent structure (`MatrixFact` and `EnsoHybrid`) achieves lower Brier error and $\ge +4\text{ pp}$ higher accuracy at `tol = 0.04` than isolated per-arm logistic regression.
-- **H3 (Zero Capability/Security Violations vs. Unconstrained Routing)**: Across `12` compliance scenarios (`zero_retention`, `thinking_family` lock & sanitization, `forced_tool_choice`, `plan_entitlement`, org provider blocks, and `fast_mode` prepaid checks), `unconstrained_routellm` commits $> 50$ violations whereas `enso_hybrid_constrained` commits **$0$ violations**.
-- **H4 (Expected Failure Mode — Deceptively Terse Hard Queries)**: Surface/hashed-ngram featurizers (`ExtractFeatures`, and lightweight routers generally) under-estimate difficulty on short ($\le 30$-token) mathematical riddles phrased in plain English with zero LaTeX/code/theorem markers, causing $\ge 15\text{ pp}$ accuracy drop under loose relative tolerances (`tol = 0.08`) unless mitigated via tight tolerance (`tol <= 0.02`) or `HIP-0510 §5` low-confidence probe escalation.
+### Live CPU Routing Overhead & Reliability (`go1.26.11 linux/amd64`, Median Prompt `1,856` Bytes, Unbatched `batchSize=1`)
 
----
+| Path | Mean Overhead | p50 | p95 | p99 | Throughput (1g / 8g) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `shipping_heuristic` (`1,856`-byte corpus-median prompts) | 14.2 us | 10.0 us | 38.8 us | 56.9 us | 70.3k / 272.4k qps |
+| `candidate_hybrid` (`1,856`-byte corpus-median prompts) | 119.6 us | 107.5 us | 231.2 us | 335.0 us | 8.36k / 37.5k qps |
+| `candidate_with_ledger` (includes in-memory ledger mutex) | 123.2 us | 110.5 us | 239.6 us | 347.7 us | 8.11k / 32.1k qps |
 
-## 4. Verification Evidence (`21` Automated Test Suites)
-
-`CGO_ENABLED=0 go test -v ./research/...` runs **21 comprehensive test functions** (`20` in `routellm_test.go` + `1` E2E CLI build/JSON test in `ensoroutellmsim/main_test.go`):
-
-1. `TestZeroRetentionHardGate`: Request-level and org-level ZDR block 30-day retention arms even if listed in `AllowedModels`.
-2. `TestThinkingFamilyAndTurnPinContinuity`: Active turn lock (`PinnedTurnModel`), `anthropic-extended` family continuity, and `ThinkingOff` vs. `MandatoryThinking` filtering.
-3. `TestCrossFamilyThinkingBlockSanitization`: Strips foreign `anthropic-extended` blocks when switching onto `zen-v4`, preserves native `zen-v4` blocks, and leaves caller input slices unmutated.
-4. `TestForcedToolChoiceAndHTTP400ParameterValidation`: Enforces `SupportsForcedToolChoice` on `required`/`named_function`, and returns HTTP `400` on `ThinkingMandatory + temperature=0`, `ThinkingMandatory + max_output_tokens<128`, and pinned mandatory-thinking + forced tool conflicts.
-5. `TestPlanEntitlementsAndNarrowOnlyPrecedence`: Verifies a child `project` cannot escalate `PlanTier`, disable ZDR, raise `MaxCostMicros`, lower `MinQualityFloor`, or grant unentitled models, while permitting downward narrowing.
-6. `TestFastModePrepaidFailClosedAndBudgetTaxonomy`: Verifies `HIP-1348 §1.2` `budget_exhausted` (`layer="tenant_ledger"`, `BillingTopUpHint=true`) on missing/`0`/underfunded balance, `BillingTopUpHint=false` on non-tenant layers, and `zen-4-pro-fast` selection when funded.
-7. `TestRuntimeProvenanceAndTenantCacheSalt`: Blocks unsigned arms lacking `RuntimeDigest` (`HIP-1345 §1.3`) and verifies `CacheSalt == "hzo-<org>"` (`HIP-1345 §1.1`).
-8. `TestContentFreeFeedbackLedgerAndCrossTenantIsolation`: Verifies cross-org `RecordFeedback` rejection, NaN/out-of-bounds `400` validation, and zero prompt-string retention in `ExportOrgLedger`.
-9. `TestRetrainPromoteOrKeepGate`: Promotes clean domain weights over cold-start rules and blocks inverted/poisoned candidate weights (`HIP-0510 §3.2`).
-10. `TestStrictQualityFloorAndColdStartFallback`: Verifies cold-start rule routing (`weights == nil`), `422` rejection under `StrictQualityFloor=true`, and best-eligible fallback under `StrictQualityFloor=false`.
-11. `TestConcurrentRoutingAndHotSwapSafety`: `24` concurrent routing/feedback goroutines racing against `4` concurrent policy & promote-or-keep weight hot-swap writers.
-12. `TestRoutingDecisionSubMillisecondLatency`: Asserts CPU microsecond routing speed (`~27 µs/op` measured on authoring host).
-13. `TestMultiTenantCompositeKeyAndScopeIdentifierHardening`: Verifies cross-tenant `RequestID` collision immunity, `"/"` delimiter-safe `(org, project)` struct keys, and HTTP `400` rejection of whitespace-padded/control-char scope IDs.
-14. `TestNonFiniteNumericAndSymmetricParameterRejection`: Rejects `NaN`/`Inf` floats, symmetric `ThinkingMandatory + ToolChoiceRequired` conflicts, unknown `RouterStrategy`, and guards `FitTrainedWeights` against non-finite samples.
-15. `TestPolicyFloorNonLooseningAndTokenCeilingAttribution`: Ensures `MinQualityFloor` never loosens default `maxQ - 0.04`, honors `MaxOutputTokens` in cost/latency estimates, and returns `422` (`GateSLOCeiling`) rather than false `402` when SLO ceilings fail under `FastMode`.
-16. `TestImplicitThinkingContinuityAndOptInTrainingExport`: Verifies automatic `PriorThinkingFamily` inference from conversation `ThinkingBlocks` and strict `TrainingOptIn` filtering on `ExportOptInGlobalTrainingSamples`.
-17. `TestOverflowSaturationAndUnpinnedMandatoryThinkingHardening`: Verifies `MaxInt64`/`MaxInt32` overflow saturation on `EstimateCostMicros`/`EstimateLatencyMs`, token/tool ceiling bounds, unpinned `MandatoryThinking` compatibility filtering, extreme finite sample safety, and empty `heldOut` promote-or-keep rejection.
-18. `TestHypothesesVerdictsHold` · `TestCommittedResultsJSONMatchesLiveCode` · `TestCommittedSchemaAndResultsContract` · `TestCLIEndToEndExecutionAndJSON`.
+- **Reliability audit (`RunReliabilityAudit`):** **`14 / 14` checks passed** across budget exhaustion (`402` + `422`), unavailable models (failover + `Allow` floor), capability mismatch (`vision`, `tools`, `context_window`, non-chat exclusion), and fallback behavior (HTTP `/route` `500`, timeout, cold-start, strict quality floor).
 
 ---
 
-## 5. Raw Before/After Measurements & Hypothesis Verdicts
+## 3. Limitations & Synthetic Fixture Scope
 
-Measured locally on Windows 11 (`amd64`, `go1.26.11`, `CGO_ENABLED=0`; full 4-part suite completes in **`3.18s`**, live CPU routing latency **`27.34 µs/decision`**). Raw output is committed at [`testdata/results.json`](testdata/results.json).
-
-### 5.1 Dense 5-Fold Stratified Cross-Validation (`n = 600` Tasks, `6` Domains × `3` Complexity Tiers)
-
-Out-of-fold calibration & Pareto metrics (`enso_hybrid`): **`ECE = 0.0186`**, **`Brier = 0.1171`**, **`APGR = 0.8239`**, **`CPT(80%) = 37.47%`**, **`CPT(90%) = 47.18%`**.
-
-| Routing Policy | Accuracy | Quality Retention | Blended `$/MTok` | `$/1k` Queries | Blended Savings | USD Savings | Mean Latency | p95 Latency |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `always_strong(zen-4-max)` | **93.50%** | 100.00% | \$21.00 | \$35.1225 | 0.00% | 0.00% | 10,391.0 ms | 26,993 ms |
-| `always_weak(zen-4-flash)` | 45.83% | 49.02% | \$0.26 | \$0.4395 | 98.75% | 98.75% | 2,470.7 ms | 6,441 ms |
-| `random_router` | 75.33% | 80.57% | \$5.94 | \$9.4719 | 71.73% | 73.03% | 6,133.7 ms | 17,379 ms |
-| `static_rule_prefer(HIP-0510)` | 84.33% | 90.20% | \$4.75 | \$8.6443 | 77.37% | 75.39% | 7,134.3 ms | 18,771 ms |
-| `routellm_mf_rel(tol=0.04)` | 90.83% | 97.15% | \$11.49 | \$26.2738 | 45.27% | 25.19% | 9,139.2 ms | 26,993 ms |
-| **`enso_hybrid_rel(tol=0.02)`** | **92.33%** | **98.75%** | **\$13.83** | **\$29.3475** | **34.16%** | **16.44%** | **9,589.5 ms** | **26,993 ms** |
-| **`enso_hybrid_rel(tol=0.04)`** | **90.50%** | **96.79%** | **\$10.55** | **\$23.9136** | **49.77%** | **31.91%** | **8,888.2 ms** | **26,993 ms** |
-| **`enso_hybrid_rel(tol=0.06)`** | **90.33%** | **96.61%** | **\$8.91** | **\$21.2737** | **57.56%** | **39.43%** | **8,429.9 ms** | **26,993 ms** |
-| **`enso_hybrid_abs(floor=0.80)`** | **87.00%** | **93.05%** | **\$6.07** | **\$17.2319** | **71.11%** | **50.94%** | **7,620.6 ms** | **26,993 ms** |
-
-*Notice the clean monotonic Pareto progression as tolerance widens (`92.33% -> 90.50% -> 90.33% -> 87.00%` accuracy alongside `34.16% -> 49.77% -> 57.56% -> 71.11%` blended `$/MTok` savings), outperforming `static_rule_prefer` (`84.33%`) across every operating point.*
-
-### 5.2 Sparse Bandit Partial-Feedback CV (`n = 180` Queries, `1` Observed Arm/Query = `85.7%` Missing Labels)
-
-| Predictor Architecture | Held-Out Brier Score | Accuracy (`tol = 0.04`) | USD Savings vs. `always_strong` |
-| --- | ---: | ---: | ---: |
-| Isolated Per-Arm Logistic (`Logistic-only`) | 0.1760 | 72.78% | — |
-| Bilinear Matrix Factorization (`x^T W p_m`) | **0.1679** | **80.56%** *(+7.78 pp vs. Logistic)* | — |
-| **Enso Hybrid (`MF + Logistic + Platt`)** | **0.1689** | **77.78%** *(+5.00 pp vs. Logistic)* | **81.80%** |
-
-### 5.3 `HIP-1345 §2.6` Capability & Security Gate Audit (`12` Scenarios, `132` Requests)
-
-| Scenario | Requests | `unconstrained_routellm` Violations | `enso_hybrid_constrained` Violations | Expected Reject / Sanitize Verified |
-| --- | ---: | ---: | ---: | :---: |
-| `zero_retention_required` | 11 | 11 | **0** | `true` |
-| `thinking_family_anthropic_continuity` | 11 | 11 | **0** | `true` |
-| `pinned_turn_model_reasoning_lock` | 11 | 11 | **0** | `true` |
-| `cross_family_thinking_block_sanitization` | 11 | 11 | **0** | `true` *(1 foreign block stripped/req)* |
-| `forced_tool_choice_required` | 11 | 0 | **0** | `true` |
-| `forced_tool_choice_named_function` | 11 | 11 | **0** | `true` |
-| `plan_entitlement_free_tier` | 11 | 8 | **0** | `true` |
-| `plan_entitlement_starter_tier` | 11 | 6 | **0** | `true` |
-| `org_blocked_external_providers` | 11 | 4 | **0** | `true` |
-| `fast_mode_fail_closed_zero_prepaid` | 11 | 11 | **0** | `true` (`budget_exhausted`) |
-| `fast_mode_fail_closed_low_prepaid` | 11 | 11 | **0** | `true` (`budget_exhausted`) |
-| `fast_mode_funded_prepaid` | 11 | 10 | **0** | `true` |
-| **Total** | **132** | **105 / 132 (79.55%)** | **0 / 132 (0.00%)** | **12 / 12** |
-
-### 5.4 Expected Failure Mode (`H4`: `60` OOD Terse Math Prompts Without Lexical Cues)
-
-| Policy | Accuracy on Terse Hard Math (`n = 60`) | Observation |
-| --- | ---: | --- |
-| `always_strong(zen-4-max)` | **88.33%** | Upper-bound reference |
-| `always_weak(zen-4-flash)` | 5.00% | Cheap model fails multi-step modular arithmetic |
-| `enso_hybrid_rel(tol=0.08)` | **35.00%** *(-53.33 pp)* | **Confirmed H4 failure mode**: short plain-English phrasing depresses complexity features under loose tolerance |
-| `enso_hybrid_abs(floor=0.85)` | 35.00% | Absolute floor still trusts overconfident cheap-chat prior on terse OOD text |
-| `enso_hybrid_rel(tol=0.02)` | **88.33%** | Tight relative tolerance recovers full parity on terse prompts |
-
-### 5.5 Hypothesis Verdicts
-
-- **H1 — CONFIRMED**: `enso_hybrid_rel(tol=0.02)` retains `98.75%` quality at `34.16%` blended savings, and `enso_hybrid_rel(tol=0.04)` retains `96.79%` quality (`+6.17 pp` above `static_rule_prefer`) at `49.77%` blended `$/MTok` savings (`31.91%` USD savings), with `ECE = 0.0186` (`<= 0.03`), `APGR = 0.8239` (`>= 0.80`), `CPT(80%) = 37.47%`, and `CPT(90%) = 47.18%`.
-- **H2 — CONFIRMED**: On `85.7%`-missing cold-start bandit logs (`1` observed arm/query), `MatrixFact` (`0.1679` Brier, `80.56%` Acc, `+7.78 pp`) and `EnsoHybrid` (`0.1689` Brier, `77.78%` Acc, `+5.00 pp`, `81.80%` USD savings) both outperform isolated per-arm Logistic (`0.1760` Brier, `72.78%` Acc).
-- **H3 — CONFIRMED**: `0 / 132` capability/security gate violations vs. `105 / 132` (`79.55%`) under unconstrained cost-quality routing.
-- **H4 — CONFIRMED**: Terse OOD reasoning prompts induce a `-53.33 pp` drop at `tol = 0.08` (`35.00%` vs. `88.33%`), recovered to `88.33%` at `tol = 0.02`.
+1. **Public LiveBench Coverage, Fixed Output Tokens & Metadata Priors:** LiveBench's public judgment split with matching active question parquets covers `318` tasks across `coding`, `language`, and `instruction_following` (no `math` or `reasoning` public overlap across these 11 models). Public cost estimates use fixed per-category `est_output_tokens` (`512` coding, `256` other) rather than model-specific completion+reasoning token lengths (so reasoning-token amplification on `o1`/`o3-mini`/`deepseek-r1` is not reflected in public USD/1k estimates). Token rates (`input_per_million`, `output_per_million`) come verbatim from `hanzoai/ai@7d0b017` (`conf/models.yaml` and `controllers/model_pricing.go`), while latency/capability fields in `hanzo_pricing_snapshot.json` are benchmark-harness priors (documented in `estimated_priors_note`). Private `hanzoai/enso-bench` runs omit `hanzo_pricing_snapshot.json` automatically unless `-pricing-json` is passed explicitly and use measured `arm_latencies_ms` when provided.
+2. **Long-Context Feature Scan & Research Ledger:** `ExtractFeatures` scans the full prompt+messages on CPU (fine for median `~1.8 KB` prompts at `~120 us`, whereas 128k-token prompts should cap the scan window prior to production graduation in `hanzoai/ai`). The in-memory `EnsoRouter.ledger` (`sync.RWMutex`) exists only for offline simulation and unit tests; concurrent 8-goroutine lock overhead is measured explicitly (`candidate_with_ledger`). Production graduation into `hanzoai/ai/router` should emit to `hanzoai/ai`'s existing asynchronous `RoutingEvent` table instead of an in-process map lock.
+3. **Terse OOD Prompts:** Surface + hashed-bigram CPU features (`FeatureDim = 24`) can underestimate difficulty on short plain-English riddles lacking structural cues unless paired with tight tolerances or Kai decision escalation.
+4. **Synthetic Fixture Scope:** `DefaultCatalog()` and `GenerateStandardCorpus()` exist exclusively for deterministic unit tests (`routellm_test.go`) and are not used for Acceptance Contract qualification.
 
 ---
 
-## 6. Limitations
+## 4. Clean Integration Path Into `hanzoai/ai`
 
-1. **Synthetic Ground-Truth Outcome Matrix vs. Live Production Traces**: While prompts contain genuine code, LaTeX, JSON-schema, multilingual, and RAG text processed blindly by `ExtractFeatures`, arm pass outcomes in `eval.go` are drawn from a seeded parametric capability table (`trueArmPassProb`) so CI runs offline in `< 4s` with zero commercial dataset/API contamination. Real model rankings on `gpqa_diamond`, `livecodebench`, `hle`, and `charxiv` (`hanzoai/enso-bench`) exhibit higher cross-domain noise (`ECE ~ 0.018–0.027`).
-2. **Bag-of-Signals Blindness on Terse Prompts (`H4`)**: As proven in §5.4, hashed n-gram + structural features cannot detect deep algorithmic hardness hidden inside a 15-word plain-English sentence without either tight tolerance (`tol <= 0.02`), Kai's `mmBERT` decision head (`HIP-1332 §3`), or `HIP-0510 §5` `escalate` confidence probing.
-3. **Static Token-Length Estimation**: Pre-execution cost gating estimates output tokens from caller hints (`EstOutputTokens` / `MaxOutputTokens`); variable-length reasoning bursts require post-completion settlement adjustment in `tenant_ledger`.
+Do not maintain a second production router in `hanzoai/cloud`. Once Hanzo's internal private qualification (`-corpus /path/to/enso-bench.jsonl`) confirms measurable gains over the shipping router:
 
----
-
-## 7. Integration Recommendation (`hanzoai/cloud` & `hanzoai/ai`)
-
-1. **In-Process Enso Policy & Capability Gate Engine (`hanzoai/cloud` / `hanzoai/ai`)**:
-   - Wire `CheckCapabilityGates`, `ValidateRequestSemantics`, `FoldPolicies`, and `SanitizeConversationMessages` directly ahead of `controllers/auto_route.go` (`HIP-0510 §8`) so `model="auto"` enforces `zero_retention`, `thinking_family`, `forced_tool_choice`, `plan_entitlement`, and `fast_mode` prepaid checks uniformly before any rule or learned selection.
-2. **Wire `TrainedWeights` into `HIP-0510 §8` Unwired `x^T W p_m` Slot**:
-   - `HIP-0510 §8` notes that the `x^T W p_m` learned router is currently unwired (`router.endpoint` empty). Because `EnsoRouter.Route()` executes in `~28 µs` on CPU in pure Go with zero external RPCs, `TrainedWeights` can be embedded directly in-process inside the Go gateway, refreshed asynchronously via `RetrainOrgPromoteOrKeep` over the existing `/v1/ai/router` content-free reward ledger!
-3. **Persist Per-Org Scope Policies Alongside `clients/gateway/edge`**:
-   - Store serialized `ScopePolicy` rows (`*`, `<org>`, `<org>/<project>`) in `cek`-encrypted SQLite using the exact TTL-cached resolver pattern of `clients/gateway/edge/policy.go`.
+1. **Zero-downtime shadow / HTTP hook:** Serve `EngineAdapter` (or stateless `NewEnsoEngineHTTPHandler`) behind `hanzoai/ai/router.Client.Endpoint` (`POST /route` & `POST /route/observe`); existing `Client.routeEngine` timeout (`150ms`) and `Allow`-guarded heuristic fallback protect production automatically.
+2. **In-process graduation:** Move `ExtractFeatures` (with a bounded prefix/suffix scan window for 128k+ prompts) + `TrainedWeights.PredictQualityByKind` directly into `hanzoai/ai/router` behind `StrategyEnso`, reading model metadata from `controllers.GetModelConfig()` (`conf/models.yaml`) and retraining asynchronously from the existing content-free `RoutingEvent` table under `RetrainOrgPromoteOrKeep`.
 
 ---
 
-## 8. HIP-1345 §2.6, HIP-0510 & HIP-1346 Status Update
-
-- **HIP-1345 §2.6 / HIP-0510 / HIP-1346 (`cloud#34`, `cloud#27` — Quality-Constrained Enso Model Routing)**:
-  - **Completed (Clean-Room Go Reference Engine & Benchmark)**: Pure-Go `research/ensoroutellm` package + `research/ensoroutellmsim` CLI implementing `MatrixFactorization` (`x^T W p_m`) + Newton-IRLS `Logistic` + 3-fold out-of-fold Platt calibration, all 5 `HIP-1345 §2.6` hard capability gates (8 deterministic checks `0–7`) + HTTP `400` mandatory-thinking conflict guard + cross-family thinking-block sanitization, narrow-only multi-tenant policy folding, content-free reward ledger, promote-or-keep retrain gating, `21` automated test suites, and committed raw JSON benchmarks (`testdata/results.json`).
-  - **Measured Summary (`seed=20261134`)**: `ECE = 0.0186`, `Brier = 0.1171`, `APGR = 0.8239`, `CPT(80%) = 37.47%`, `CPT(90%) = 47.18%`; `enso_hybrid_rel(tol=0.02)` retains `98.75%` quality at `34.16%` blended savings, `enso_hybrid_rel(tol=0.04)` retains `96.79%` quality (`+6.17 pp` over `static_rule_prefer`) at `49.77%` blended `$/MTok` savings (`31.91%` USD savings), `enso_hybrid_abs(floor=0.80)` retains `93.05%` quality at `71.11%` blended / `50.94%` USD savings, cold-start sparse bandit accuracy improves `+5.00 pp` (`EnsoHybrid`) and `+7.78 pp` (`MatrixFact`) over isolated logistic predictors, capability gate violations drop from `105/132` (`79.55%`) to `0/132` (`0.00%`), and CPU routing runs in `~27.3 µs/op`.
-
----
-
-## 9. File Map
+## 5. File Map
 
 | Path | Description |
 | --- | --- |
-| [`catalog.go`](catalog.go) | 10-arm model catalog, pricing/latency estimators, `ScopePolicy`, narrow-only `FoldPolicies`, `SplitMix64` RNG |
-| [`gates.go`](gates.go) | `RouteError` (`HIP-1348 §1.2`), HTTP `400` `ValidateRequestSemantics`, 8-check `CheckCapabilityGates`, `SanitizeConversationMessages` |
-| [`features.go`](features.go) | Content-free 24-dim CPU `ExtractFeatures` (domain + structural + signed FNV-1a hashed n-grams) & `ClassifyCoarseBucket` |
-| [`router.go`](router.go) | Bilinear `MF` + Newton-IRLS `Logistic` + 3-fold OOF Platt trainer, `EnsoRouter`, content-free ledger, `RetrainOrgPromoteOrKeep` |
-| [`eval.go`](eval.go) | 4-part evaluation suite (Dense 5-fold CV, Sparse Bandit CV, 12-scenario Gate Audit, H4 Adversarial Terse Slice) |
-| [`routellm_test.go`](routellm_test.go) | 20 test suites: all 5 capability gates, HTTP 400 validation, block stripping, narrow-only precedence, overflow saturation, ledger privacy, concurrency, JSON drift lock |
-| [`results/schema.json`](results/schema.json) | Strict Draft-07 JSON Schema (`additionalProperties: false`) |
-| [`results/PROTOCOL.md`](results/PROTOCOL.md) | `<15-second` offline reproduction protocol |
-| [`testdata/results.json`](testdata/results.json) | Raw deterministic output of `ensoroutellmsim` (`seed=20261134`) |
-| [`../ensoroutellmsim/main.go`](../ensoroutellmsim/main.go) | CLI benchmark runner & CPU latency timer |
-| [`../ensoroutellmsim/main_test.go`](../ensoroutellmsim/main_test.go) | Cross-platform E2E CLI build & JSON verification test |
+| [`models_yaml.go`](models_yaml.go) | Stdlib parser for canonical `hanzoai/ai/conf/models.yaml` + pricing snapshot projection |
+| [`shipping_baseline.go`](shipping_baseline.go) | Port of `hanzoai/ai/router` (`Classify`, `Policy`, `RoutingPolicy`) + bounded `/route` & `/route/observe` HTTP adapter |
+| [`public_eval.go`](public_eval.go) | JSONL corpus loader, stratified CV, nested 3-fold OOF matched-budget + bootstrap CIs, live CPU perf quantiles, catalog-agnostic 14-check reliability audit |
+| [`catalog.go`](catalog.go) | `ModelArm`, cost/latency estimators, narrow-only `FoldPolicies`, `SplitMix64` RNG, synthetic unit-test fixture |
+| [`gates.go`](gates.go) | `ValidateRequestSemantics`, deterministic capability/retention/outage/budget gates, thinking-block sanitization |
+| [`features.go`](features.go) | Zero-allocation 24-dim CPU content-free `ExtractFeatures` |
+| [`router.go`](router.go) | Bilinear MF + Newton-IRLS Logistic + 3-fold OOF Platt trainer, `EnsoRouter`, content-free ledger, lock-free-eval promote-or-keep gate |
+| [`acceptance_test.go`](acceptance_test.go) | Acceptance Contract test suite (YAML loader hardening, `hanzoai/ai/router` parity, adapter bounds, schema & manifest SHA-256 contract, aggregate-only privacy + canary model-ID leak tests, LiveBench CV & drift lock) |
+| [`routellm_test.go`](routellm_test.go) | 20 unit/security/concurrency/gate test suites |
+| [`scripts/prepare_livebench_eval.py`](scripts/prepare_livebench_eval.py) | Reproducible pinned LiveBench downloader & feature extractor |
+| [`testdata/dataset_manifest.json`](testdata/dataset_manifest.json) | Pinned HuggingFace SHAs, parquet SHA-256 digests, and `hanzoai/ai@7d0b017` LF config provenance |
+| [`results/acceptance_schema.json`](results/acceptance_schema.json) | Strict JSON Schema (`additionalProperties: false`) for aggregate-only receipts |
+| [`results/PROTOCOL.md`](results/PROTOCOL.md) | Offline reproduction and internal private qualification commands |
+| [`../ensoroutellmsim/main.go`](../ensoroutellmsim/main.go) | CLI runner (`-mode acceptance \| extract-features \| synthetic`) |
