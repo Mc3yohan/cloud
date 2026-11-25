@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	er "github.com/hanzoai/cloud/research/ensoroutellm"
@@ -23,36 +24,43 @@ func TestCLIEndToEndExecutionAndJSON(t *testing.T) {
 	goBinName := "go"
 	if runtime.GOOS == "windows" {
 		binName += ".exe"
-		goBinName += ".exe"
+		goBinName = "go.exe"
 	}
-	bin := filepath.Join(tmp, binName)
-	outJSON := filepath.Join(tmp, "results.json")
+	binPath := filepath.Join(tmp, binName)
+	outJSON := filepath.Join(tmp, "acceptance.json")
 
-	goCmdPath := filepath.Join(runtime.GOROOT(), "bin", goBinName)
-	buildCmd := exec.Command(goCmdPath, "build", "-o", bin, ".")
+	buildCmd := exec.Command(goBinName, "build", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, string(out))
+		t.Fatalf("go build ensoroutellmsim failed: %v\n%s", err, string(out))
 	}
 
-	runCmd := exec.Command(bin, "-out", outJSON)
+	rootDir := filepath.Join("..", "..")
+	runCmd := exec.Command(
+		binPath,
+		"-mode", "acceptance",
+		"-models-yaml", filepath.Join(rootDir, "research", "ensoroutellm", "testdata", "hanzo_models_snapshot.yaml"),
+		"-pricing-json", filepath.Join(rootDir, "research", "ensoroutellm", "testdata", "hanzo_pricing_snapshot.json"),
+		"-corpus", filepath.Join(rootDir, "research", "ensoroutellm", "testdata", "livebench_public_features.jsonl"),
+		"-perf-iters", "500",
+		"-out", outJSON,
+	)
 	stdout, err := runCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("cli run failed: %v\n%s", err, string(stdout))
+		t.Fatalf("ensoroutellmsim acceptance run failed: %v\n%s", err, string(stdout))
 	}
-	if len(stdout) == 0 {
-		t.Fatal("expected formatted table output on stdout")
+	if !strings.Contains(string(stdout), "Reliability Audit:") || !strings.Contains(string(stdout), "Matched Budget vs") {
+		t.Fatalf("CLI stdout missing expected acceptance summary sections:\n%s", string(stdout))
 	}
 
 	raw, err := os.ReadFile(outJSON)
 	if err != nil {
-		t.Fatalf("read json output: %v", err)
+		t.Fatalf("read CLI output JSON: %v", err)
 	}
-	var rep er.BenchmarkReport
+	var rep er.AcceptanceReport
 	if err := json.Unmarshal(raw, &rep); err != nil {
-		t.Fatalf("unmarshal BenchmarkReport: %v", err)
+		t.Fatalf("unmarshal CLI output JSON: %v", err)
 	}
-	if rep.DenseCorpusSize != 600 || rep.GateAudit.ConstrainedTotalViolations != 0 {
-		t.Fatalf("unexpected CLI report contents: corpus=%d violations=%d",
-			rep.DenseCorpusSize, rep.GateAudit.ConstrainedTotalViolations)
+	if rep.Schema != "hanzo.ensoroutellm.acceptance/v2" || !rep.AggregateOnly || !rep.Reliability.AllPassed {
+		t.Fatalf("unexpected CLI acceptance report: schema=%q agg=%v rel=%+v", rep.Schema, rep.AggregateOnly, rep.Reliability)
 	}
 }

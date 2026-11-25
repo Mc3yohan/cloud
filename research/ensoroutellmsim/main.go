@@ -1,16 +1,18 @@
 // Copyright 2026 Hanzo AI, Inc.
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-// Command ensoroutellmsim executes the 4-part Enso / RouteLLM benchmark suite
-// from research/ensoroutellm (hanzoai/cloud#34 & #27, HIP-1345 §2.6), prints
-// formatted before/after tables and live CPU routing latency, and optionally
-// writes the deterministic raw JSON report to disk.
+// Command ensoroutellmsim runs the hanzoai/cloud#59 Acceptance Contract
+// benchmark suite (canonical hanzoai/ai conf/models.yaml, shipping
+// hanzoai/ai/router baseline, real public or private JSONL corpora,
+// calibration/Pareto/CI metrics, live CPU routing latency quantiles, and
+// fault-injection reliability checks).
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -18,110 +20,156 @@ import (
 )
 
 func main() {
-	out := flag.String("out", "", "optional path to write raw JSON benchmark report")
-	seed := flag.Uint64("seed", er.DefaultEvalSeed, "deterministic SplitMix64 benchmark seed")
+	defaultPricingPath := filepath.Join("research", "ensoroutellm", "testdata", "hanzo_pricing_snapshot.json")
+	defaultCorpusPath := filepath.Join("research", "ensoroutellm", "testdata", "livebench_public_features.jsonl")
+	mode := flag.String("mode", "acceptance", "execution mode: acceptance | extract-features | synthetic")
+	modelsYAML := flag.String("models-yaml", filepath.Join("research", "ensoroutellm", "testdata", "hanzo_models_snapshot.yaml"), "path to canonical hanzoai/ai conf/models.yaml")
+	pricingJSON := flag.String("pricing-json", defaultPricingPath, "optional path to pricing snapshot JSON (omitted automatically when -corpus is overridden)")
+	corpusPath := flag.String("corpus", defaultCorpusPath, "path to raw-prompt or content-free JSONL evaluation corpus")
+	inPath := flag.String("in", "", "input raw JSONL path for -mode extract-features")
+	out := flag.String("out", "", "optional path to write JSON report or extracted features JSONL")
+	seed := flag.Uint64("seed", er.DefaultEvalSeed, "deterministic SplitMix64 seed")
+	folds := flag.Int("folds", 5, "stratified cross-validation folds")
+	perfIters := flag.Int("perf-iters", 2000, "live CPU routing latency iterations")
 	flag.Parse()
 
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+	effectivePricingJSON := *pricingJSON
+	if !explicitFlags["pricing-json"] && explicitFlags["corpus"] && filepath.Clean(*corpusPath) != filepath.Clean(defaultCorpusPath) {
+		effectivePricingJSON = ""
+	}
+
+	switch *mode {
+	case "extract-features":
+		if *inPath == "" || *out == "" {
+			fmt.Fprintln(os.Stderr, "-mode extract-features requires both -in and -out")
+			os.Exit(2)
+		}
+		sha, count, err := er.ConvertRawCorpusToContentFreeJSONL(*inPath, *out)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "extract-features:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Extracted %d content-free records -> %s (sha256=%s)\n", count, *out, sha)
+
+	case "synthetic":
+		runSyntheticCLI(*seed, *out)
+
+	case "acceptance":
+		start := time.Now()
+		report, err := er.RunAcceptanceBenchmark(er.AcceptanceConfig{
+			ModelsYAMLPath:      *modelsYAML,
+			PricingSnapshotPath: effectivePricingJSON,
+			CorpusPath:          *corpusPath,
+			Seed:                *seed,
+			CVFolds:             *folds,
+			PerfIterations:      *perfIters,
+			BootstrapResamples:  500,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "acceptance benchmark:", err)
+			os.Exit(1)
+		}
+		elapsed := time.Since(start)
+
+		if *out != "" {
+			raw, err := er.MarshalAcceptanceJSON(report)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "marshal acceptance json:", err)
+				os.Exit(1)
+			}
+			if dir := filepath.Dir(*out); dir != "" && dir != "." {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					fmt.Fprintln(os.Stderr, "mkdir output dir:", err)
+					os.Exit(1)
+				}
+			}
+			if err := os.WriteFile(*out, raw, 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, "write acceptance json:", err)
+				os.Exit(1)
+			}
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintf(w, "=== Acceptance Benchmark (%s, n=%d, %d-fold CV, arms=%d, aggregate_only=%v) ===\n",
+			report.DatasetName, report.CorpusSize, report.CVFolds, report.Catalog.ActiveArms, report.AggregateOnly)
+		fmt.Fprintf(w, "Calibration: ECE=%.4f  Brier=%.4f  APGR=%.4f  CPT80=%.2f%%  CPT90=%.2f%%\n",
+			report.Calibration.ECE10Bin, report.Calibration.Brier, report.Calibration.APGR,
+			report.Calibration.CPT80Pct, report.Calibration.CPT90Pct)
+		fmt.Fprintln(w, "POLICY\tACC\tCI95\tRET\t$/1K_QRY\tSAVE\tP50_MS\tP95_MS\tP99_MS\tARMS")
+		for _, pm := range report.Policies {
+			fmt.Fprintf(w, "%s\t%.2f%%\t[%.2f,%.2f]\t%.1f%%\t$%.4f\t%.1f%%\t%d\t%d\t%d\t%d\n",
+				pm.PolicyName,
+				pm.Accuracy*100,
+				pm.AccuracyCI95[0]*100, pm.AccuracyCI95[1]*100,
+				pm.QualityRetentionPct,
+				pm.USDPer1kQueries,
+				pm.USDCostSavingPct,
+				pm.P50ModelLatencyMs, pm.P95ModelLatencyMs, pm.P99ModelLatencyMs,
+				pm.UniqueModelsSelected,
+			)
+		}
+		fmt.Fprintln(w)
+		mc := report.MatchedBudgetCanonical
+		ma := report.MatchedBudgetAdapted
+		fmt.Fprintf(w, "Matched Budget vs %s: %s -> %+.2f pp (95%% CI [%+.2f, %+.2f] pp), cost %+.2f%% (matched=%v)\n",
+			mc.BaselinePolicy, mc.CandidatePolicy, mc.AccuracyDeltaPP,
+			mc.AccuracyDeltaCI95PP[0], mc.AccuracyDeltaCI95PP[1], mc.CostDeltaPct, mc.BudgetMatched)
+		fmt.Fprintf(w, "Matched Budget vs %s: %s -> %+.2f pp (95%% CI [%+.2f, %+.2f] pp), cost %+.2f%% (matched=%v)\n\n",
+			ma.BaselinePolicy, ma.CandidatePolicy, ma.AccuracyDeltaPP,
+			ma.AccuracyDeltaCI95PP[0], ma.AccuracyDeltaCI95PP[1], ma.CostDeltaPct, ma.BudgetMatched)
+
+		ps := report.Performance
+		fmt.Fprintf(w, "Routing CPU Overhead (median prompt=%d bytes, %d iters):\n", ps.PromptLengthMedianBytes, ps.CandidateHybrid.Iterations)
+		fmt.Fprintf(w, "  shipping_heuristic:   mean=%.0fns p50=%dns p95=%dns p99=%dns | %.0f qps (1g) / %.0f qps (8g)\n",
+			ps.ShippingHeuristic.MeanNs, ps.ShippingHeuristic.P50Ns, ps.ShippingHeuristic.P95Ns, ps.ShippingHeuristic.P99Ns,
+			ps.ShippingHeuristic.ThroughputQPS, ps.ShippingHeuristic.Concurrent8QPS)
+		fmt.Fprintf(w, "  candidate_hybrid:     mean=%.0fns p50=%dns p95=%dns p99=%dns | %.0f qps (1g) / %.0f qps (8g)\n",
+			ps.CandidateHybrid.MeanNs, ps.CandidateHybrid.P50Ns, ps.CandidateHybrid.P95Ns, ps.CandidateHybrid.P99Ns,
+			ps.CandidateHybrid.ThroughputQPS, ps.CandidateHybrid.Concurrent8QPS)
+		fmt.Fprintf(w, "  candidate_with_ledger: mean=%.0fns p50=%dns p95=%dns p99=%dns | %.0f qps (1g) / %.0f qps (8g)\n\n",
+			ps.CandidateWithLedger.MeanNs, ps.CandidateWithLedger.P50Ns, ps.CandidateWithLedger.P95Ns, ps.CandidateWithLedger.P99Ns,
+			ps.CandidateWithLedger.ThroughputQPS, ps.CandidateWithLedger.Concurrent8QPS)
+
+		fmt.Fprintf(w, "Reliability Audit: %d/%d checks passed (all_passed=%v) | Suite completed in %s\n",
+			report.Reliability.PassedChecks, report.Reliability.TotalChecks, report.Reliability.AllPassed, elapsed.Round(time.Millisecond))
+		_ = w.Flush()
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown -mode %q (want acceptance, extract-features, or synthetic)\n", *mode)
+		os.Exit(2)
+	}
+}
+
+func runSyntheticCLI(seed uint64, out string) {
 	start := time.Now()
-	report := er.RunBenchmarkSuite(*seed)
+	report := er.RunBenchmarkSuite(seed)
 	elapsed := time.Since(start)
 
-	if *out != "" {
+	if out != "" {
 		raw, err := er.MarshalBenchmarkJSON(report)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "marshal benchmark json:", err)
 			os.Exit(1)
 		}
-		if err := os.WriteFile(*out, raw, 0o644); err != nil {
+		if err := os.WriteFile(out, raw, 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "write benchmark json:", err)
 			os.Exit(1)
 		}
 	}
 
-	// Measure pure CPU per-decision latency over 5,000 live Route() calls.
-	cat := er.DefaultCatalog()
-	corpus := er.GenerateStandardCorpus(100, cat, *seed)
-	var samples []er.TrainingSample
-	for _, t := range corpus {
-		f := er.ExtractFeatures(t.Request)
-		for _, a := range cat {
-			if a.ZeroRetention && !a.FastModeOnly {
-				samples = append(samples, er.TrainingSample{QueryID: t.QueryID, Features: f, ModelID: a.ID, Passed: t.ArmOutcomes[a.ID]})
-			}
-		}
-	}
-	tw := er.FitTrainedWeights(samples, cat, *seed)
-	benchRouter := er.NewEnsoRouter(cat, tw)
-	benchRouter.SetOrgPolicy("org-eval-enterprise", er.ScopePolicy{PlanTier: er.PlanEnterprise, HasPlanTier: true, RequireZeroRetention: true})
-	const latIters = 5000
-	latStart := time.Now()
-	for i := 0; i < latIters; i++ {
-		req := corpus[i%len(corpus)].Request
-		req.RequestID = "" // hot routing path without ledger map allocation
-		if _, err := benchRouter.Route(req, er.StrategyEnsoHybridConstrained); err != nil {
-			fmt.Fprintf(os.Stderr, "benchmark route error: %v\n", err)
-			os.Exit(1)
-		}
-	}
-	usPerDecision := float64(time.Since(latStart).Nanoseconds()) / float64(latIters) / 1000.0
-
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "=== 1. Dense 5-Fold Stratified CV (%d tasks, ECE=%.4f, Brier=%.4f, APGR=%.4f, CPT80=%.2f%%, CPT90=%.2f%%) ===\n",
-		report.DenseCorpusSize,
-		report.Calibration.ECE10Bin,
-		report.Calibration.Brier,
-		report.Calibration.APGR,
-		report.Calibration.CPT80Pct,
-		report.Calibration.CPT90Pct,
-	)
-	fmt.Fprintln(w, "POLICY\tACC\tRETENTION\t$/MTOK\t$/1K_QRY\tMTOK_SAVE\tUSD_SAVE\tMEAN_LAT\tP95_LAT")
+	fmt.Fprintf(w, "=== Synthetic Unit-Fixture Suite (%d tasks, ECE=%.4f, Brier=%.4f, APGR=%.4f) ===\n",
+		report.DenseCorpusSize, report.Calibration.ECE10Bin, report.Calibration.Brier, report.Calibration.APGR)
+	fmt.Fprintln(w, "POLICY\tACC\tRETENTION\t$/MTOK\t$/1K_QRY\tUSD_SAVE\tP95_LAT")
 	for _, pm := range report.DensePolicies {
-		fmt.Fprintf(w, "%s\t%.2f%%\t%.2f%%\t$%.2f\t$%.4f\t%.2f%%\t%.2f%%\t%.1fms\t%dms\n",
-			pm.PolicyName,
-			pm.Accuracy*100,
-			pm.QualityRetentionPct,
-			pm.BlendedUSDPerMTok,
-			pm.USDPer1kQueries,
-			pm.BlendedCostSavingPct,
-			pm.USDCostSavingPct,
-			pm.MeanLatencyMs,
-			pm.P95LatencyMs,
-		)
+		fmt.Fprintf(w, "%s\t%.2f%%\t%.2f%%\t$%.2f\t$%.4f\t%.2f%%\t%dms\n",
+			pm.PolicyName, pm.Accuracy*100, pm.QualityRetentionPct,
+			pm.BlendedUSDPerMTok, pm.USDPer1kQueries, pm.USDCostSavingPct, pm.P95LatencyMs)
 	}
-	fmt.Fprintln(w)
-	sc := report.SparseComparison
-	fmt.Fprintf(w, "=== 2. Sparse Bandit Partial-Feedback CV (%d queries, %d observed arm/query = 85.7%% missing) ===\n",
-		sc.Queries, sc.ObservedArmsPerQuery)
-	fmt.Fprintf(w, "Logistic-only: Brier=%.4f Acc=%.2f%%  |  MatrixFact(x^TWp): Brier=%.4f Acc=%.2f%%  |  EnsoHybrid: Brier=%.4f Acc=%.2f%% (USD Savings=%.2f%%)\n\n",
-		sc.LogisticOnlyBrier, sc.LogisticOnlyAcc*100,
-		sc.MatrixFactBrier, sc.MatrixFactAcc*100,
-		sc.EnsoHybridBrier, sc.EnsoHybridAcc*100,
-		sc.EnsoHybridSavingsPct,
-	)
-
-	fmt.Fprintf(w, "=== 3. HIP-1345 §2.6 Capability & Security Gate Audit (%d scenarios, %d requests) ===\n",
-		report.GateAudit.TotalScenarios, report.GateAudit.TotalRequests)
-	fmt.Fprintln(w, "SCENARIO\tREQS\tUNCONSTRAINED_VIOL\tCONSTRAINED_VIOL\tREJECT_OK")
-	for _, gs := range report.GateAudit.Scenarios {
-		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%v\n",
-			gs.Scenario, gs.Requests, gs.UnconstrainedViolations, gs.ConstrainedViolations, gs.ExpectedRejectionHandled)
-	}
-	fmt.Fprintf(w, "TOTAL GATE VIOLATIONS:\t%d\t%d\t%d\t-\n\n",
-		report.GateAudit.TotalRequests,
-		report.GateAudit.UnconstrainedTotalViolations,
-		report.GateAudit.ConstrainedTotalViolations,
-	)
-
-	adv := report.AdversarialSlice
-	fmt.Fprintf(w, "=== 4. Expected Failure Mode (H4: %d OOD Terse Math Prompts Without Lexical Cues) ===\n", adv.Queries)
-	fmt.Fprintf(w, "always_strong=%.2f%%  always_weak=%.2f%%  enso_loose(tol=0.08)=%.2f%%  enso_tight(tol=0.02)=%.2f%%  enso_floor(0.85)=%.2f%%\n",
-		adv.AlwaysStrongAccuracy*100,
-		adv.AlwaysWeakAccuracy*100,
-		adv.LooseTol008Accuracy*100,
-		adv.TightTol002Accuracy*100,
-		adv.HighFloor085Accuracy*100,
-	)
-	fmt.Fprintf(w, "\nSuite completed in %s | Live CPU decision latency: %.2f µs/op (%d iters)\n",
-		elapsed.Round(time.Millisecond), usPerDecision, latIters)
+	fmt.Fprintf(w, "\nSynthetic suite completed in %s\n", elapsed.Round(time.Millisecond))
 	_ = w.Flush()
 }
